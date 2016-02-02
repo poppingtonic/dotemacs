@@ -1,6 +1,6 @@
 ;;; org-capture.el --- Fast note taking in Org-mode
 
-;; Copyright (C) 2010-2014 Free Software Foundation, Inc.
+;; Copyright (C) 2010-2015 Free Software Foundation, Inc.
 
 ;; Author: Carsten Dominik <carsten at orgmode dot org>
 ;; Keywords: outlines, hypermedia, calendar, wp
@@ -53,7 +53,7 @@
 
 (declare-function org-datetree-find-date-create "org-datetree"
 		  (date &optional keep-restriction))
-(declare-function org-table-get-specials "org-table" ())
+(declare-function org-table-analyze "org-table" ())
 (declare-function org-table-goto-line "org-table" (N))
 (declare-function org-pop-to-buffer-same-window "org-compat"
 		  (&optional buffer-or-name norecord label))
@@ -64,6 +64,7 @@
 (defvar org-remember-default-headline)
 (defvar org-remember-templates)
 (defvar org-table-hlines)
+(defvar org-table-current-begin-pos)
 (defvar dired-buffers)
 
 (defvar org-capture-clock-was-started nil
@@ -201,7 +202,7 @@ properties are:
 
  :clock-resume       Start the interrupted clock when finishing the capture.
                      Note that :clock-keep has precedence over :clock-resume.
-                     When setting both to `t', the current clock will run and
+                     When setting both to t, the current clock will run and
                      the previous one will not be resumed.
 
  :unnarrowed         Do not narrow the target buffer, simply show the
@@ -434,7 +435,9 @@ Turning on this mode runs the normal hook `org-capture-mode-hook'."
   nil " Rem" org-capture-mode-map
   (org-set-local
    'header-line-format
-   "Capture buffer.  Finish `C-c C-c', refile `C-c C-w', abort `C-c C-k'."))
+   (substitute-command-keys
+    "\\<org-capture-mode-map>Capture buffer.  Finish \\[org-capture-finalize], \
+refile \\[org-capture-refile], abort \\[org-capture-kill].")))
 (define-key org-capture-mode-map "\C-c\C-c" 'org-capture-finalize)
 (define-key org-capture-mode-map "\C-c\C-k" 'org-capture-kill)
 (define-key org-capture-mode-map "\C-c\C-w" 'org-capture-refile)
@@ -459,7 +462,7 @@ For example, if you have a capture template \"c\" and you want
 this template to be accessible only from `message-mode' buffers,
 use this:
 
-   '((\"c\" ((in-mode . \"message-mode\"))))
+   \\='((\"c\" ((in-mode . \"message-mode\"))))
 
 Here are the available contexts definitions:
 
@@ -477,7 +480,7 @@ accessible if there is at least one valid check.
 You can also bind a key to another agenda custom command
 depending on contextual rules.
 
-    '((\"c\" \"d\" ((in-mode . \"message-mode\"))))
+    \\='((\"c\" \"d\" ((in-mode . \"message-mode\"))))
 
 Here it means: in `message-mode buffers', use \"c\" as the
 key for the capture template otherwise associated with \"d\".
@@ -1161,17 +1164,16 @@ may have been stored before."
      ((and table-line-pos
 	   (string-match "\\(I+\\)\\([-+][0-9]\\)" table-line-pos))
       ;; we have a complex line specification
-      (goto-char (point-min))
-      (let ((nh (- (match-end 1) (match-beginning 1)))
-	    (delta (string-to-number (match-string 2 table-line-pos)))
-	    ll)
+      (let ((ll (ignore-errors
+		  (save-match-data (org-table-analyze))
+		  (aref org-table-hlines
+			(- (match-end 1) (match-beginning 1)))))
+	    (delta (string-to-number (match-string 2 table-line-pos))))
 	;; The user wants a special position in the table
-	(org-table-get-specials)
-	(setq ll (ignore-errors (aref org-table-hlines nh)))
-	(unless ll (error "Invalid table line specification \"%s\""
-			  table-line-pos))
-	(setq ll (+ ll delta (if (< delta 0) 0 -1)))
-	(org-goto-line ll)
+	(unless ll
+	  (error "Invalid table line specification \"%s\"" table-line-pos))
+	(goto-char org-table-current-begin-pos)
+	(forward-line (+ ll delta (if (< delta 0) 0 -1)))
 	(org-table-insert-row 'below)
 	(beginning-of-line 1)
 	(delete-region (point) (1+ (point-at-eol)))
@@ -1590,8 +1592,7 @@ The template may still contain \"%?\" for cursor positioning."
     (unless template (setq template "") (message "No template") (ding)
 	    (sit-for 1))
     (save-window-excursion
-      (delete-other-windows)
-      (org-pop-to-buffer-same-window (get-buffer-create "*Capture*"))
+      (org-switch-to-buffer-other-window (get-buffer-create "*Capture*"))
       (erase-buffer)
       (insert template)
       (goto-char (point-min))
@@ -1609,7 +1610,7 @@ The template may still contain \"%?\" for cursor positioning."
 	    (delete-region start end)
 	    (condition-case error
 		(insert-file-contents filename)
-	      (error (insert (format "%%![Couldn't insert %s: %s]"
+	      (error (insert (format "%%![Couldn not insert %s: %s]"
 				     filename error)))))))
 
       ;; The current time

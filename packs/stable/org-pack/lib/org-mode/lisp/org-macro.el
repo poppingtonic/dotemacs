@@ -106,6 +106,8 @@ Return an alist containing all macro templates found."
 				      (org-remove-double-quotes val))))
 			   (unless (member file files)
 			     (with-temp-buffer
+			       (setq default-directory
+				     (file-name-directory file))
 			       (org-mode)
 			       (insert (org-file-contents file 'noerror))
 			       (setq templates
@@ -135,7 +137,7 @@ function installs the following ones: \"property\",
           (when (org-string-nw-p l)
             (condition-case _
                 (let ((org-link-search-must-match-exact-headline t))
-                  (org-link-search l nil nil t))
+                  (org-link-search l nil t))
               (error
                (error \"Macro property failed: cannot find location %s\"
                       l)))))

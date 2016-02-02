@@ -1453,7 +1453,11 @@ See also `test-org-table/copy-field'."
     "a\nb"
     (let ((org-export-filter-table-cell-functions (list (lambda (c b i) "filter"))))
       (orgtbl-to-generic (org-table-to-lisp "| a |\n|---|\n| b |")
-			 '(:hline nil))))))
+			 '(:hline nil)))))
+  ;; Macros, even if unknown, are returned as-is.
+  (should
+   (equal "{{{macro}}}"
+	  (orgtbl-to-generic (org-table-to-lisp "| {{{macro}}} |") nil))))
 
 (ert-deftest test-org-table/to-latex ()
   "Test `orgtbl-to-latex' specifications."
@@ -1604,7 +1608,7 @@ See also `test-org-table/copy-field'."
 	    (org-table-sort-lines t ?a)
 	    (buffer-string))))
   (should
-   (equal "| C |\n| b |\n| a |\n"
+   (equal "| b |\n| a |\n| C |\n"
 	  (org-test-with-temp-text "| <point>a |\n| C |\n| b |\n"
 	    (org-table-sort-lines nil ?A)
 	    (buffer-string))))

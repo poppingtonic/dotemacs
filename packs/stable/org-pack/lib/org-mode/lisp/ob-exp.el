@@ -1,6 +1,6 @@
 ;;; ob-exp.el --- Exportation of org-babel source blocks
 
-;; Copyright (C) 2009-2014 Free Software Foundation, Inc.
+;; Copyright (C) 2009-2015 Free Software Foundation, Inc.
 
 ;; Authors: Eric Schulte
 ;;	Dan Davison
@@ -41,7 +41,7 @@
 (declare-function org-in-commented-heading-p "org" (&optional no-inheritance))
 (declare-function org-in-block-p "org" (names))
 (declare-function org-in-verbatim-emphasis "org" ())
-(declare-function org-link-search "org" (s &optional type avoid-pos stealth))
+(declare-function org-link-search "org" (s &optional avoid-pos stealth))
 (declare-function org-fill-template "org" (template alist))
 (declare-function org-split-string "org" (string &optional separators))
 (declare-function org-element-at-point "org-element" ())
@@ -54,7 +54,7 @@
 (defcustom org-export-babel-evaluate t
   "Switch controlling code evaluation during export.
 When set to nil no code will be evaluated as part of the export
-process.  When set to 'inline-only, only inline code blocks will
+process.  When set to `inline-only', only inline code blocks will
 be executed."
   :group 'org-babel
   :version "24.1"
@@ -99,7 +99,7 @@ be executed."
 
 (defun org-babel-exp-src-block (&rest headers)
   "Process source block for export.
-Depending on the 'export' headers argument, replace the source
+Depending on the `export' headers argument, replace the source
 code block like this:
 
 both ---- display the code and the results

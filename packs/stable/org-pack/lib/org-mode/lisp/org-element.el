@@ -158,7 +158,8 @@ specially in `org-element--object-lex'.")
 		;; Empty lines.
 		"$" "\\|"
 		;; Tables (any type).
-		"\\(?:|\\|\\+-[-+]\\)" "\\|"
+		"|" "\\|"
+		"\\+\\(?:-+\\+\\)+[ \t]*$" "\\|"
 		;; Comments, keyword-like or block-like constructs.
 		;; Blocks and keywords with dual values need to be
 		;; double-checked.
@@ -489,18 +490,18 @@ objects, or a strings.
 
 The function takes care of setting `:parent' property for CHILD.
 Return parent element."
-  ;; Link every child to PARENT. If PARENT is nil, it is a secondary
-  ;; string: parent is the list itself.
-  (mapc (lambda (child)
-	  (org-element-put-property child :parent (or parent children)))
-	children)
-  ;; Add CHILDREN at the end of PARENT contents.
-  (when parent
-    (apply 'org-element-set-contents
-	   parent
-	   (nconc (org-element-contents parent) children)))
-  ;; Return modified PARENT element.
-  (or parent children))
+  (if (not children) parent
+    ;; Link every child to PARENT. If PARENT is nil, it is a secondary
+    ;; string: parent is the list itself.
+    (dolist (child children)
+      (org-element-put-property child :parent (or parent children)))
+    ;; Add CHILDREN at the end of PARENT contents.
+    (when parent
+      (apply #'org-element-set-contents
+	     parent
+	     (nconc (org-element-contents parent) children)))
+    ;; Return modified PARENT element.
+    (or parent children)))
 
 (defun org-element-extract-element (element)
   "Extract ELEMENT from parse tree.
@@ -572,6 +573,13 @@ The function takes care of setting `:parent' property for NEW."
     (setcar (cdr old) (nth 1 new))
     ;; Transfer type.
     (setcar old (car new))))
+
+(defun org-element-create (type &optional props &rest children)
+  "Create a new element of type TYPE.
+Optional argument PROPS, when non-nil, is a plist defining the
+properties of the element.  CHILDREN can be elements, objects or
+strings."
+  (apply #'org-element-adopt-elements (list type props) children))
 
 (defun org-element-copy (datum)
   "Return a copy of DATUM.
@@ -1333,7 +1341,8 @@ CONTENTS is the contents of the element."
 		  (goto-char origin)))))
 	   ;; At some text line.  Check if it ends any previous item.
 	   (t
-	    (let ((ind (progn (skip-chars-forward " \t") (current-column))))
+	    (let ((ind (save-excursion (skip-chars-forward " \t")
+				       (current-column))))
 	      (when (<= ind top-ind)
 		(skip-chars-backward " \r\t\n")
 		(forward-line))
@@ -1342,10 +1351,10 @@ CONTENTS is the contents of the element."
 		  (setcar (nthcdr 6 item) (line-beginning-position))
 		  (push item struct)
 		  (unless items
-		    (throw 'exit (sort struct 'car-less-than-car))))))
+		    (throw 'exit (sort struct #'car-less-than-car))))))
 	    ;; Skip blocks (any type) and drawers contents.
 	    (cond
-	     ((and (looking-at "#\\+BEGIN\\(:\\|_\\S-+\\)")
+	     ((and (looking-at "[ \t]*#\\+BEGIN\\(:\\|_\\S-+\\)")
 		   (re-search-forward
 		    (format "^[ \t]*#\\+END%s[ \t]*$" (match-string 1))
 		    limit t)))
@@ -1624,7 +1633,7 @@ containing `:call', `:inside-header', `:arguments',
 		       (if (eobp) (point) (line-beginning-position))))
 	   (valid-value
 	    (string-match
-	     "\\([^()\n]+?\\)\\(?:\\[\\(.*?\\)\\]\\)?(\\(.*?\\))[ \t]*\\(.*\\)"
+	     "\\([^()\n]+?\\)\\(?:\\[\\(.*?\\)\\]\\)?(\\(.*\\))[ \t]*\\(.*\\)"
 	     value)))
       (list 'babel-call
 	    (nconc
@@ -2484,10 +2493,12 @@ Assume point is at the beginning of the table."
   (save-excursion
     (let* ((case-fold-search t)
 	   (table-begin (point))
-	   (type (if (org-at-table.el-p) 'table.el 'org))
+	   (type (if (looking-at "[ \t]*|") 'org 'table.el))
+           (end-re (format "^[ \t]*\\($\\|[^| \t%s]\\)"
+			   (if (eq type 'org) "" "+")))
 	   (begin (car affiliated))
 	   (table-end
-	    (if (re-search-forward org-table-any-border-regexp limit 'm)
+	    (if (re-search-forward end-re limit 'move)
 		(goto-char (match-beginning 0))
 	      (point)))
 	   (tblfm (let (acc)
@@ -2552,7 +2563,7 @@ containing `:begin', `:end', `:contents-begin', `:contents-end',
 				(end-of-line)
 				(skip-chars-backward " \t")
 				(point))))
-	   (end (progn (forward-line) (point))))
+	   (end (line-beginning-position 2)))
       (list 'table-row
 	    (list :type type
 		  :begin begin
@@ -3034,87 +3045,122 @@ Assume point is at the beginning of the link."
 	      contents-end (match-end 1)))
        ;; Type 2: Standard link, i.e. [[http://orgmode.org][homepage]]
        ((looking-at org-bracket-link-regexp)
-	(setq contents-begin (match-beginning 3)
-	      contents-end (match-end 3)
-	      link-end (match-end 0)
-	      ;; RAW-LINK is the original link.  Expand any
-	      ;; abbreviation in it.
-	      raw-link (org-translate-link
-			(org-link-expand-abbrev
+	(setq contents-begin (match-beginning 3))
+	(setq contents-end (match-end 3))
+	(setq link-end (match-end 0))
+	;; RAW-LINK is the original link.  Expand any
+	;; abbreviation in it.
+	;;
+	;; Also treat any newline character and associated
+	;; indentation as a single space character.  This is not
+	;; compatible with RFC 3986, which requires to ignore
+	;; them altogether.  However, doing so would require
+	;; users to encode spaces on the fly when writing links
+	;; (e.g., insert [[shell:ls%20*.org]] instead of
+	;; [[shell:ls *.org]], which defeats Org's focus on
+	;; simplicity.
+	(setq raw-link (org-link-expand-abbrev
+			(replace-regexp-in-string
+			 "[ \t]*\n[ \t]*" " "
 			 (org-match-string-no-properties 1))))
-	;; Determine TYPE of link and set PATH accordingly.
+	;; Determine TYPE of link and set PATH accordingly.  According
+	;; to RFC 3986, remove whitespaces from URI in external links.
+	;; In internal ones, treat indentation as a single space.
 	(cond
 	 ;; File type.
 	 ((or (file-name-absolute-p raw-link)
 	      (string-match "\\`\\.\\.?/" raw-link))
-	  (setq type "file" path raw-link))
+	  (setq type "file")
+	  (setq path raw-link))
 	 ;; Explicit type (http, irc, bbdb...).  See `org-link-types'.
 	 ((string-match org-link-types-re raw-link)
-	  (setq type (match-string 1 raw-link)
-		;; According to RFC 3986, extra whitespace should be
-		;; ignored when a URI is extracted.
-		path (replace-regexp-in-string
-		      "[ \t]*\n[ \t]*" "" (substring raw-link (match-end 0)))))
+	  (setq type (match-string 1 raw-link))
+	  (setq path (substring raw-link (match-end 0))))
 	 ;; Id type: PATH is the id.
-	 ((string-match "\\`id:\\([-a-f0-9]+\\)" raw-link)
+	 ((string-match "\\`id:\\([-a-f0-9]+\\)\\'" raw-link)
 	  (setq type "id" path (match-string 1 raw-link)))
 	 ;; Code-ref type: PATH is the name of the reference.
-	 ((string-match "\\`(\\(.*\\))\\'" raw-link)
-	  (setq type "coderef" path (match-string 1 raw-link)))
+	 ((and (org-string-match-p "\\`(" raw-link)
+	       (org-string-match-p ")\\'" raw-link))
+	  (setq type "coderef")
+	  (setq path (substring raw-link 1 -1)))
 	 ;; Custom-id type: PATH is the name of the custom id.
 	 ((= (string-to-char raw-link) ?#)
-	  (setq type "custom-id" path (substring raw-link 1)))
+	  (setq type "custom-id")
+	  (setq path (substring raw-link 1)))
 	 ;; Fuzzy type: Internal link either matches a target, an
 	 ;; headline name or nothing.  PATH is the target or
 	 ;; headline's name.
-	 (t (setq type "fuzzy" path raw-link))))
+	 (t
+	  (setq type "fuzzy")
+	  (setq path raw-link))))
        ;; Type 3: Plain link, e.g., http://orgmode.org
        ((looking-at org-plain-link-re)
 	(setq raw-link (org-match-string-no-properties 0)
 	      type (org-match-string-no-properties 1)
 	      link-end (match-end 0)
 	      path (org-match-string-no-properties 2)))
-       ;; Type 4: Angular link, e.g., <http://orgmode.org>
+       ;; Type 4: Angular link, e.g., <http://orgmode.org>.  Unlike to
+       ;; bracket links, follow RFC 3986 and remove any extra
+       ;; whitespace in URI.
        ((looking-at org-angle-link-re)
-	(setq raw-link (buffer-substring-no-properties
-			(match-beginning 1) (match-end 2))
-	      type (org-match-string-no-properties 1)
-	      link-end (match-end 0)
-	      path (org-match-string-no-properties 2)))
+	(setq type (org-match-string-no-properties 1))
+	(setq link-end (match-end 0))
+	(setq raw-link
+	      (buffer-substring-no-properties
+	       (match-beginning 1) (match-end 2)))
+	(setq path (replace-regexp-in-string
+		    "[ \t]*\n[ \t]*" "" (org-match-string-no-properties 2))))
        (t (throw 'no-object nil)))
       ;; In any case, deduce end point after trailing white space from
       ;; LINK-END variable.
       (save-excursion
-	(setq post-blank (progn (goto-char link-end) (skip-chars-forward " \t"))
-	      end (point))
-	;; Special "file" type link processing.  Extract opening
-	;; application and search option, if any.  Also normalize URI.
-	(when (string-match "\\`file\\(?:\\+\\(.+\\)\\)?\\'" type)
-	  (setq application (match-string 1 type) type "file")
-	  (when (string-match "::\\(.*\\)\\'" path)
-	    (setq search-option (match-string 1 path)
-		  path (replace-match "" nil nil path)))
-	  (setq path (replace-regexp-in-string "\\`/+" "/" path)))
-	(list 'link
-	      (list :type type
-		    :path path
-		    :raw-link (or raw-link path)
-		    :application application
-		    :search-option search-option
-		    :begin begin
-		    :end end
-		    :contents-begin contents-begin
-		    :contents-end contents-end
-		    :post-blank post-blank))))))
+	(setq post-blank
+	      (progn (goto-char link-end) (skip-chars-forward " \t")))
+	(setq end (point)))
+      ;; Special "file" type link processing.  Extract opening
+      ;; application and search option, if any.  Also normalize URI.
+      (when (string-match "\\`file\\(?:\\+\\(.+\\)\\)?\\'" type)
+	(setq application (match-string 1 type) type "file")
+	(when (string-match "::\\(.*\\)\\'" path)
+	  (setq search-option (match-string 1 path))
+	  (setq path (replace-match "" nil nil path)))
+	(setq path (replace-regexp-in-string "\\`///+" "/" path)))
+      ;; Translate link, if `org-link-translation-function' is set.
+      (let ((trans (and (functionp org-link-translation-function)
+			(funcall org-link-translation-function type path))))
+	(when trans
+	  (setq type (car trans))
+	  (setq path (cdr trans))))
+      (list 'link
+	    (list :type type
+		  :path path
+		  :raw-link (or raw-link path)
+		  :application application
+		  :search-option search-option
+		  :begin begin
+		  :end end
+		  :contents-begin contents-begin
+		  :contents-end contents-end
+		  :post-blank post-blank)))))
 
 (defun org-element-link-interpreter (link contents)
   "Interpret LINK object as Org syntax.
 CONTENTS is the contents of the object, or nil."
   (let ((type (org-element-property :type link))
-	(raw-link (org-element-property :raw-link link)))
-    (if (string= type "radio") raw-link
+	(path (org-element-property :path link)))
+    (if (string= type "radio") path
       (format "[[%s]%s]"
-	      raw-link
+	      (cond ((string= type "coderef") (format "(%s)" path))
+		    ((string= type "custom-id") (concat "#" path))
+		    ((string= type "file")
+		     (let ((app (org-element-property :application link))
+			   (opt (org-element-property :search-option link)))
+		       (concat type (and app (concat "+" app)) ":"
+			       path
+			       (and opt (concat "::" opt)))))
+		    ((string= type "fuzzy") path)
+		    (t (concat type ":" path)))
 	      (if contents (format "[%s]" contents) "")))))
 
 
@@ -3779,7 +3825,8 @@ element it has to parse."
 	     ((looking-at "%%(")
 	      (org-element-diary-sexp-parser limit affiliated))
 	     ;; Table.
-	     ((org-at-table-p t) (org-element-table-parser limit affiliated))
+	     ((looking-at "[ \t]*\\(|\\|\\+\\(-+\\+\\)+[ \t]*$\\)")
+	      (org-element-table-parser limit affiliated))
 	     ;; List.
 	     ((looking-at (org-item-re))
 	      (org-element-plain-list-parser
@@ -3834,8 +3881,9 @@ position of point and CDR is nil."
 		(and dualp
 		     (let ((sec (org-match-string-no-properties 2)))
 		       (if (or (not sec) (not parsedp)) sec
-			 (org-element--parse-objects
-			  (match-beginning 2) (match-end 2) nil restrict)))))
+			 (save-match-data
+			   (org-element--parse-objects
+			    (match-beginning 2) (match-end 2) nil restrict))))))
 	       ;; Attribute a property name to KWD.
 	       (kwd-sym (and kwd (intern (concat ":" (downcase kwd))))))
 	  ;; Now set final shape for VALUE.
@@ -3994,30 +4042,30 @@ Assuming TREE is a variable containing an Org buffer parse tree,
 the following example will return a flat list of all `src-block'
 and `example-block' elements in it:
 
-  \(org-element-map tree '(example-block src-block) #'identity)
+  (org-element-map tree \\='(example-block src-block) #\\='identity)
 
 The following snippet will find the first headline with a level
 of 1 and a \"phone\" tag, and will return its beginning position:
 
-  \(org-element-map tree 'headline
-   \(lambda (hl)
-     \(and (= (org-element-property :level hl) 1)
-          \(member \"phone\" (org-element-property :tags hl))
-          \(org-element-property :begin hl)))
+  (org-element-map tree \\='headline
+   (lambda (hl)
+     (and (= (org-element-property :level hl) 1)
+          (member \"phone\" (org-element-property :tags hl))
+          (org-element-property :begin hl)))
    nil t)
 
 The next example will return a flat list of all `plain-list' type
 elements in TREE that are not a sub-list themselves:
 
-  \(org-element-map tree 'plain-list #'identity nil nil 'plain-list)
+  (org-element-map tree \\='plain-list #\\='identity nil nil \\='plain-list)
 
 Eventually, this example will return a flat list of all `bold'
 type objects containing a `latex-snippet' type object, even
 looking into captions:
 
-  \(org-element-map tree 'bold
-   \(lambda (b)
-     \(and (org-element-map b 'latex-snippet #'identity nil t) b))
+  (org-element-map tree \\='bold
+   (lambda (b)
+     (and (org-element-map b \\='latex-snippet #\\='identity nil t) b))
    nil nil nil t)"
   ;; Ensure TYPES and NO-RECURSION are a list, even of one element.
   (let* ((types (if (listp types) types (list types)))
@@ -4687,7 +4735,7 @@ This cache is used in `org-element-context'.")
 
 A request is a vector with the following pattern:
 
- \[NEXT BEG END OFFSET OUTREACH PARENT PHASE]
+ \[NEXT BEG END OFFSET PARENT PHASE]
 
 Processing a synchronization request consists of three phases:
 
@@ -4698,7 +4746,7 @@ Processing a synchronization request consists of three phases:
 During phase 0, NEXT is the key of the first element to be
 removed, BEG and END is buffer position delimiting the
 modifications.  Elements starting between them (inclusive) are
-removed and so are those contained within OUTREACH.  PARENT, when
+removed.  So are elements whose parent is removed.  PARENT, when
 non-nil, is the parent of the first element to be removed.
 
 During phase 1, NEXT is the key of the next known element in
@@ -4856,6 +4904,7 @@ This function assumes `org-element--cache' is a valid AVL tree."
 (defsubst org-element--cache-active-p ()
   "Non-nil when cache is active in current buffer."
   (and org-element-use-cache
+       org-element--cache
        (or (derived-mode-p 'org-mode) orgstruct-mode)))
 
 (defun org-element--cache-find (pos &optional side)
@@ -5040,7 +5089,7 @@ updated before current modification are actually submitted."
 	  (clrhash org-element--cache-sync-keys))))))
 
 (defun org-element--cache-process-request
-  (request next threshold time-limit future-change)
+    (request next threshold time-limit future-change)
   "Process synchronization REQUEST for all entries before NEXT.
 
 REQUEST is a vector, built by `org-element--cache-submit-request'.
@@ -5060,54 +5109,61 @@ not registered yet in the cache are going to happen.  See
 Throw `interrupt' if the process stops before completing the
 request."
   (catch 'quit
-    (when (= (aref request 6) 0)
+    (when (= (aref request 5) 0)
       ;; Phase 0.
       ;;
       ;; Delete all elements starting after BEG, but not after buffer
-      ;; position END or past element with key NEXT.
+      ;; position END or past element with key NEXT.  Also delete
+      ;; elements contained within a previously removed element
+      ;; (stored in `last-container').
       ;;
       ;; At each iteration, we start again at tree root since
       ;; a deletion modifies structure of the balanced tree.
       (catch 'end-phase
-        (let ((beg (aref request 0))
-              (end (aref request 2))
-	      (outreach (aref request 4)))
-          (while t
-            (when (org-element--cache-interrupt-p time-limit)
-	      (throw 'interrupt nil))
-            ;; Find first element in cache with key BEG or after it.
-            (let ((node (org-element--cache-root)) data data-key)
-              (while node
-                (let* ((element (avl-tree--node-data node))
-                       (key (org-element--cache-key element)))
-                  (cond
-                   ((org-element--cache-key-less-p key beg)
-                    (setq node (avl-tree--node-right node)))
-                   ((org-element--cache-key-less-p beg key)
-                    (setq data element
-                          data-key key
-                          node (avl-tree--node-left node)))
-                   (t (setq data element
-                            data-key key
-                            node nil)))))
-	      (if data
-		  (let ((pos (org-element-property :begin data)))
-		    (if (if (or (not next)
-				(org-element--cache-key-less-p data-key next))
-			    (<= pos end)
-			  (let ((up data))
-			    (while (and up (not (eq up outreach)))
-			      (setq up (org-element-property :parent up)))
-			    up))
-			(org-element--cache-remove data)
-		      (aset request 0 data-key)
-		      (aset request 1 pos)
-		      (aset request 6 1)
-		      (throw 'end-phase nil)))
-		;; No element starting after modifications left in
-		;; cache: further processing is futile.
-		(throw 'quit t)))))))
-    (when (= (aref request 6) 1)
+        (while t
+	  (when (org-element--cache-interrupt-p time-limit)
+	    (throw 'interrupt nil))
+	  ;; Find first element in cache with key BEG or after it.
+	  (let ((beg (aref request 0))
+		(end (aref request 2))
+		(node (org-element--cache-root))
+		data data-key last-container)
+	    (while node
+	      (let* ((element (avl-tree--node-data node))
+		     (key (org-element--cache-key element)))
+		(cond
+		 ((org-element--cache-key-less-p key beg)
+		  (setq node (avl-tree--node-right node)))
+		 ((org-element--cache-key-less-p beg key)
+		  (setq data element
+			data-key key
+			node (avl-tree--node-left node)))
+		 (t (setq data element
+			  data-key key
+			  node nil)))))
+	    (if data
+		(let ((pos (org-element-property :begin data)))
+		  (if (if (or (not next)
+			      (org-element--cache-key-less-p data-key next))
+			  (<= pos end)
+			(and last-container
+			     (let ((up data))
+			       (while (and up (not (eq up last-container)))
+				 (setq up (org-element-property :parent up)))
+			       up)))
+		      (progn (when (and (not last-container)
+					(> (org-element-property :end data)
+					   end))
+			       (setq last-container data))
+			     (org-element--cache-remove data))
+		    (aset request 0 data-key)
+		    (aset request 1 pos)
+		    (aset request 5 1)
+		    (throw 'end-phase nil)))
+	      ;; No element starting after modifications left in
+	      ;; cache: further processing is futile.
+	      (throw 'quit t))))))
+    (when (= (aref request 5) 1)
       ;; Phase 1.
       ;;
       ;; Phase 0 left a hole in the cache.  Some elements after it
@@ -5141,7 +5197,7 @@ request."
 	  (let ((next-request (nth 1 org-element--cache-sync-requests)))
 	    (aset next-request 0 key)
 	    (aset next-request 1 (aref request 1))
-	    (aset next-request 6 1))
+	    (aset next-request 5 1))
 	  (throw 'quit t)))
       ;; Next element will start at its beginning position plus
       ;; offset, since it hasn't been shifted yet.  Therefore, LIMIT
@@ -5153,11 +5209,11 @@ request."
 	       ;; Changes are going to happen around this element and
 	       ;; they will trigger another phase 1 request.  Skip the
 	       ;; current one.
-	       (aset request 6 2))
+	       (aset request 5 2))
 	      (t
 	       (let ((parent (org-element--parse-to limit t time-limit)))
-		 (aset request 5 parent)
-		 (aset request 6 2))))))
+		 (aset request 4 parent)
+		 (aset request 5 2))))))
     ;; Phase 2.
     ;;
     ;; Shift all elements starting from key START, but before NEXT, by
@@ -5171,7 +5227,7 @@ request."
     ;; request is updated.
     (let ((start (aref request 0))
 	  (offset (aref request 3))
-	  (parent (aref request 5))
+	  (parent (aref request 4))
 	  (node (org-element--cache-root))
 	  (stack (list nil))
 	  (leftp t)
@@ -5191,7 +5247,7 @@ request."
 	      ;; Handle interruption request.  Update current request.
 	      (when (or exit-flag (org-element--cache-interrupt-p time-limit))
 		(aset request 0 key)
-		(aset request 5 parent)
+		(aset request 4 parent)
 		(throw 'interrupt nil))
 	      ;; Shift element.
 	      (unless (zerop offset)
@@ -5492,7 +5548,7 @@ change, as an integer."
   (let ((next (car org-element--cache-sync-requests))
 	delete-to delete-from)
     (if (and next
-	     (zerop (aref next 6))
+	     (zerop (aref next 5))
 	     (> (setq delete-to (+ (aref next 2) (aref next 3))) end)
 	     (<= (setq delete-from (aref next 1)) end))
 	;; Current changes can be merged with first sync request: we
@@ -5503,7 +5559,7 @@ change, as an integer."
 	  ;; boundaries of robust parents, if any.  Otherwise, find
 	  ;; first element to remove and update request accordingly.
 	  (if (> beg delete-from)
-	      (let ((up (aref next 5)))
+	      (let ((up (aref next 4)))
 		(while up
 		  (org-element--cache-shift-positions
 		   up offset '(:contents-end :end))
@@ -5512,7 +5568,7 @@ change, as an integer."
 	      (when first
 		(aset next 0 (org-element--cache-key first))
 		(aset next 1 (org-element-property :begin first))
-		(aset next 5 (org-element-property :parent first))))))
+		(aset next 4 (org-element-property :parent first))))))
       ;; Ensure cache is correct up to END.  Also make sure that NEXT,
       ;; if any, is no longer a 0-phase request, thus ensuring that
       ;; phases are properly ordered.  We need to provide OFFSET as
@@ -5528,21 +5584,13 @@ change, as an integer."
 		     ;; When changes happen before the first known
 		     ;; element, re-parent and shift the rest of the
 		     ;; cache.
-		     ((> beg end) (vector key beg nil offset nil nil 1))
+		     ((> beg end) (vector key beg nil offset nil 1))
 		     ;; Otherwise, we find the first non robust
 		     ;; element containing END.  All elements between
 		     ;; FIRST and this one are to be removed.
-		     ;;
-		     ;; Among them, some could be located outside the
-		     ;; synchronized part of the cache, in which case
-		     ;; comparing buffer positions to find them is
-		     ;; useless.  Instead, we store the element
-		     ;; containing them in the request itself.  All
-		     ;; its children will be removed.
 		     ((let ((first-end (org-element-property :end first)))
 			(and (> first-end end)
-			     (vector key beg first-end offset first
-				     (org-element-property :parent first) 0))))
+			     (vector key beg first-end offset first 0))))
 		     (t
 		      (let* ((element (org-element--cache-find end))
 			     (end (org-element-property :end element))
@@ -5551,8 +5599,7 @@ change, as an integer."
 				    (>= (org-element-property :begin up) beg))
 			  (setq end (org-element-property :end up)
 				element up))
-			(vector key beg end offset element
-				(org-element-property :parent first) 0)))))
+			(vector key beg end offset element 0)))))
 		  org-element--cache-sync-requests)
 	  ;; No element to remove.  No need to re-parent either.
 	  ;; Simply shift additional elements, if any, by OFFSET.
@@ -5570,7 +5617,8 @@ buffers."
   (interactive "P")
   (dolist (buffer (if all (buffer-list) (list (current-buffer))))
     (with-current-buffer buffer
-      (when (org-element--cache-active-p)
+      (when (and org-element-use-cache
+		 (or (derived-mode-p 'org-mode) orgstruct-mode))
 	(org-set-local 'org-element--cache
 		       (avl-tree-create #'org-element--cache-compare))
 	(org-set-local 'org-element--cache-objects (make-hash-table :test #'eq))

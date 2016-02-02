@@ -1,5 +1,5 @@
 ;;; org-mobile.el --- Code for asymmetric sync with a mobile device
-;; Copyright (C) 2009-2014 Free Software Foundation, Inc.
+;; Copyright (C) 2009-2015 Free Software Foundation, Inc.
 ;;
 ;; Author: Carsten Dominik <carsten at orgmode dot org>
 ;; Keywords: outlines, hypermedia, calendar, wp
@@ -439,14 +439,14 @@ agenda view showing the flagged items."
 	(if org-mobile-use-encryption
 	    org-mobile-encryption-tempfile
 	  target-file)
+      (insert "#+READONLY\n")
       (while (setq entry (pop def-todo))
-	(insert "#+READONLY\n")
 	(setq kwds (mapcar (lambda (x) (if (string-match "(" x)
 					   (substring x 0 (match-beginning 0))
 					 x))
 			   (cdr entry)))
 	(insert "#+TODO: " (mapconcat 'identity kwds " ") "\n")
-	(setq dwds (member "|" kwds)
+	(setq dwds (or (member "|" kwds) (last kwds))
 	      twds (org-delete-all dwds kwds)
 	      todo-kwds (org-delete-all twds todo-kwds)
 	      done-kwds (org-delete-all dwds done-kwds)))
